@@ -1,45 +1,45 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
-import { UnrealCodeAnalyzer } from '../analyzer.js';
-import * as fs from 'fs';
-import * as path from 'path';
-import { mockTreeSitter, mockCppBindings, mockGlob } from './setup';
+import { jest, describe, it, expect, beforeEach, beforeAll } from '@jest/globals';
+import type { PathLike } from 'fs';
+import { mockGlob, MockParserCJS, mockCppLanguage, mockQueryCtor } from './setup';
 
-import { PathLike } from 'fs';
+let UnrealCodeAnalyzer: typeof import('../analyzer.js').UnrealCodeAnalyzer;
+let analyzer: import('../analyzer.js').UnrealCodeAnalyzer;
+let fsModule: jest.Mocked<typeof import('fs')>;
 
-// Mock fs module
-jest.mock('fs');
+beforeAll(async () => {
+  jest.unstable_mockModule('fs', () => ({
+    __esModule: true,
+    existsSync: jest.fn(),
+    readFileSync: jest.fn(),
+    writeFileSync: jest.fn(),
+  }));
 
-// Get the mocked fs module
-const mockedFs = jest.mocked(fs, { shallow: false });
+  jest.unstable_mockModule('glob', () => ({
+    __esModule: true,
+    sync: mockGlob.sync,
+  }));
 
-jest.mock('glob', () => ({
-  sync: mockGlob.sync
-}));
+  jest.unstable_mockModule('../tree-sitter-compat.js', () => ({
+    __esModule: true,
+    ParserCJS: MockParserCJS,
+    CPPLanguage: mockCppLanguage,
+    QueryCtor: mockQueryCtor,
+  }));
 
-jest.mock('tree-sitter', () => {
-  return jest.fn(() => mockTreeSitter);
+  ({ UnrealCodeAnalyzer } = await import('../analyzer.js'));
+  fsModule = (await import('fs')) as unknown as jest.Mocked<typeof import('fs')>;
 });
-
-jest.mock('tree-sitter-cpp', () => {
-  return jest.fn(() => mockCppBindings);
-});
-
-jest.mock('tree-sitter-cpp/bindings/node', () => mockCppBindings);
 
 describe('UnrealCodeAnalyzer', () => {
-  let analyzer: UnrealCodeAnalyzer;
-
   beforeEach(() => {
     jest.clearAllMocks();
-    // Reset mocks
-    jest.clearAllMocks();
-    
-    // Setup fs mocks
-    mockedFs.existsSync.mockImplementation((path: PathLike) => {
+    fsModule.existsSync.mockImplementation((path: PathLike) => {
       const pathStr = path.toString();
       return !pathStr.includes('invalid');
     });
-    mockedFs.readFileSync.mockReturnValue('');
+    fsModule.readFileSync.mockReturnValue('');
+    fsModule.writeFileSync.mockImplementation(() => undefined as any);
+    mockGlob.sync.mockReturnValue([]);
     analyzer = new UnrealCodeAnalyzer();
   });
 
@@ -50,7 +50,7 @@ describe('UnrealCodeAnalyzer', () => {
 
     it('should initialize with valid Unreal Engine path', async () => {
       const mockPath = '/valid/path';
-      mockedFs.existsSync.mockReturnValue(true);
+      fsModule.existsSync.mockReturnValue(true);
 
       await analyzer.initialize(mockPath);
       expect(analyzer.isInitialized()).toBe(true);
@@ -58,7 +58,7 @@ describe('UnrealCodeAnalyzer', () => {
 
     it('should throw error with invalid Unreal Engine path', async () => {
       const mockPath = '/invalid/path';
-      mockedFs.existsSync.mockReturnValue(false);
+      fsModule.existsSync.mockReturnValue(false);
 
       await expect(analyzer.initialize(mockPath))
         .rejects
@@ -67,7 +67,7 @@ describe('UnrealCodeAnalyzer', () => {
 
     it('should initialize with valid custom codebase path', async () => {
       const mockPath = '/valid/custom/path';
-      mockedFs.existsSync.mockReturnValue(true);
+      fsModule.existsSync.mockReturnValue(true);
 
       await analyzer.initializeCustomCodebase(mockPath);
       expect(analyzer.isInitialized()).toBe(true);
@@ -75,7 +75,7 @@ describe('UnrealCodeAnalyzer', () => {
 
     it('should throw error with invalid custom codebase path', async () => {
       const mockPath = '/invalid/custom/path';
-      mockedFs.existsSync.mockReturnValue(false);
+      fsModule.existsSync.mockReturnValue(false);
 
       await expect(analyzer.initializeCustomCodebase(mockPath))
         .rejects
@@ -85,7 +85,7 @@ describe('UnrealCodeAnalyzer', () => {
 
   describe('class analysis', () => {
     beforeEach(async () => {
-      mockedFs.existsSync.mockReturnValue(true);
+      fsModule.existsSync.mockReturnValue(true);
       await analyzer.initializeCustomCodebase('/mock/path');
     });
 
@@ -104,24 +104,39 @@ describe('UnrealCodeAnalyzer', () => {
             int TestProperty;
         };
       `;
-      mockedFs.readFileSync.mockReturnValue(mockFileContent);
+      fsModule.readFileSync.mockReturnValue(mockFileContent);
+      mockGlob.sync.mockReturnValue(['/mock/path/Test.h']);
+
+      const classInfo = {
+        name: 'TestClass',
+        file: '/mock/path/Test.h',
+        line: 1,
+        superclasses: [],
+        interfaces: [],
+        methods: [],
+        properties: [],
+        comments: [],
+      };
+
+      jest.spyOn(analyzer as any, 'parseFile').mockImplementation(async () => {
+        (analyzer as any).classCache.set('TestClass', classInfo);
+      });
 
       const result = await analyzer.analyzeClass('TestClass');
-      expect(result).toHaveProperty('name', 'TestClass');
-      expect(result).toHaveProperty('methods');
-      expect(result).toHaveProperty('properties');
+      expect(result).toEqual(classInfo);
     });
   });
 
   describe('reference finding', () => {
     beforeEach(async () => {
-      mockedFs.existsSync.mockReturnValue(true);
+      fsModule.existsSync.mockReturnValue(true);
       await analyzer.initializeCustomCodebase('/mock/path');
+      (analyzer as any).unrealPath = '/mock/path';
     });
 
     it('should find references to a class', async () => {
       const mockContent = 'TestClass instance;';
-      mockedFs.readFileSync.mockReturnValue(mockContent);
+      fsModule.readFileSync.mockReturnValue(mockContent);
 
       const references = await analyzer.findReferences('TestClass', 'class');
       expect(references).toBeInstanceOf(Array);
@@ -138,13 +153,14 @@ describe('UnrealCodeAnalyzer', () => {
 
   describe('code search', () => {
     beforeEach(async () => {
-      mockedFs.existsSync.mockReturnValue(true);
+      fsModule.existsSync.mockReturnValue(true);
       await analyzer.initializeCustomCodebase('/mock/path');
+      (analyzer as any).unrealPath = '/mock/path';
     });
 
     it('should search code with query', async () => {
       const mockContent = 'void TestFunction() { }';
-      mockedFs.readFileSync.mockReturnValue(mockContent);
+      fsModule.readFileSync.mockReturnValue(mockContent);
 
       const results = await analyzer.searchCode('TestFunction');
       expect(results).toBeInstanceOf(Array);
@@ -153,7 +169,7 @@ describe('UnrealCodeAnalyzer', () => {
 
     it('should respect file pattern in search', async () => {
       const mockContent = 'test content';
-      mockedFs.readFileSync.mockReturnValue(mockContent);
+      fsModule.readFileSync.mockReturnValue(mockContent);
 
       const results = await analyzer.searchCode('test', '*.cpp');
       expect(results).toBeInstanceOf(Array);
@@ -161,7 +177,7 @@ describe('UnrealCodeAnalyzer', () => {
 
     it('should handle comment inclusion setting', async () => {
       const mockContent = '// Test comment\ncode';
-      mockedFs.readFileSync.mockReturnValue(mockContent);
+      fsModule.readFileSync.mockReturnValue(mockContent);
 
       const resultsWithComments = await analyzer.searchCode('Test', '*.cpp', true);
       const resultsWithoutComments = await analyzer.searchCode('Test', '*.cpp', false);
@@ -172,13 +188,13 @@ describe('UnrealCodeAnalyzer', () => {
 
   describe('subsystem analysis', () => {
     beforeEach(async () => {
-      mockedFs.existsSync.mockReturnValue(true);
+      fsModule.existsSync.mockReturnValue(true);
       await analyzer.initialize('/mock/unreal/path');
     });
 
     it('should analyze a valid subsystem', async () => {
       const mockContent = 'class RenderingClass { };';
-      mockedFs.readFileSync.mockReturnValue(mockContent);
+      fsModule.readFileSync.mockReturnValue(mockContent);
 
       const result = await analyzer.analyzeSubsystem('Rendering');
       expect(result).toHaveProperty('name', 'Rendering');

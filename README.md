@@ -84,12 +84,15 @@ The analyzer is built using:
 - Tree-sitter for robust C++ parsing
 - Model Context Protocol SDK for AI assistant integration
 - Glob for file pattern matching
+- Zod for schema validation
 
 Key dependencies:
-- @modelcontextprotocol/create-server: ^0.1.0
-- tree-sitter: ^0.20.1
-- tree-sitter-cpp: ^0.20.0
-- glob: ^8.1.0
+- @modelcontextprotocol/sdk: ^1.25.1
+- tree-sitter: ^0.21.1
+- tree-sitter-cpp: ^0.23.4
+- tree-sitter-wasms: ^0.1.13
+- glob: ^13.0.0
+- zod: ^4.3.4
 
 ## Usage
 

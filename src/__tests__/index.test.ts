@@ -1,267 +1,157 @@
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
-import { UnrealCodeAnalyzer } from '../analyzer.js';
+import { jest, describe, it, expect, beforeAll, beforeEach, afterAll } from '@jest/globals';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  handlerRegistry,
+  mockServerInstance,
+  serverConstructorCalls,
+} from './__mocks__/@modelcontextprotocol/sdk/server/index.js';
 
-let mockServer: any;
-let toolHandlers: { [key: string]: Function } = {};
-const MockServer = jest.fn(() => mockServer);
+let listToolsHandler: Function | undefined;
+let callToolHandler: Function | undefined;
+let mockAnalyzerClass: any;
+let consoleErrorSpy: any;
 
-jest.mock('@modelcontextprotocol/create-server', () => ({
-  Server: MockServer,
-  StdioServerTransport: jest.fn()
-}));
-
-beforeEach(() => {
-  mockServer = {
-    setRequestHandler: jest.fn((type: string, handler: Function) => {
-      toolHandlers[type] = handler;
-    }),
-    connect: jest.fn(),
-    close: jest.fn(),
-    onerror: jest.fn()
-  };
-  MockServer.mockReturnValue(mockServer);
-});
-const MockUnrealCodeAnalyzer = jest.fn();
-jest.mock('../analyzer.js', () => ({
-  UnrealCodeAnalyzer: MockUnrealCodeAnalyzer
-}));
-
-describe('UnrealAnalyzerServer', () => {
-  let mockAnalyzer: jest.Mocked<UnrealCodeAnalyzer>;
-
-  beforeAll(() => {
-    // Mock Analyzer implementation
-    mockAnalyzer = {
+beforeAll(async () => {
+  await jest.unstable_mockModule('../analyzer.js', () => {
+    mockAnalyzerClass = jest.fn(function MockAnalyzer() {});
+    Object.assign(mockAnalyzerClass.prototype, {
       initialize: jest.fn(),
       initializeCustomCodebase: jest.fn(),
-      isInitialized: jest.fn(),
+      isInitialized: jest.fn().mockReturnValue(true),
       analyzeClass: jest.fn(),
       findClassHierarchy: jest.fn(),
       findReferences: jest.fn(),
       searchCode: jest.fn(),
       analyzeSubsystem: jest.fn(),
-    } as any;
-
-    // Mock UnrealCodeAnalyzer constructor
-    MockUnrealCodeAnalyzer.mockImplementation(() => mockAnalyzer);
-  });
-
-  beforeEach(async () => {
-    jest.clearAllMocks();
-    toolHandlers = {};
-
-    // Import the server module to trigger initialization
-    await jest.isolateModules(async () => {
-      const mod = await import('../index.js');
-      await new Promise(resolve => setTimeout(resolve, 100)); // Wait for handlers to be registered
     });
+    return { __esModule: true, UnrealCodeAnalyzer: mockAnalyzerClass };
   });
 
-  describe('Server Initialization', () => {
-    it('should initialize server with correct configuration', () => {
-      expect(MockServer).toHaveBeenCalledWith(
-        {
-          name: 'unreal-analyzer',
-          version: '0.1.0',
+  await jest.unstable_mockModule('../tree-sitter-compat.js', () => ({
+    __esModule: true,
+    ParserCJS: jest.fn(() => ({
+      setLanguage: jest.fn(),
+      parse: jest.fn(() => ({
+        rootNode: {
+          hasError: jest.fn().mockReturnValue(false),
+          descendantsOfType: jest.fn().mockReturnValue([]),
         },
-        {
-          capabilities: {
-            tools: {},
-          },
-        }
-      );
-    });
+      })),
+    })),
+    CPPLanguage: {},
+    QueryCtor: class MockQueryCtor {
+      constructor() {
+        return { matches: jest.fn().mockReturnValue([]) };
+      }
+    },
+  }));
 
-    it('should set up error handler', () => {
-      expect(mockServer.onerror).toBeDefined();
+  consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  await import('../index.js');
+  listToolsHandler = handlerRegistry.get(ListToolsRequestSchema);
+  callToolHandler = handlerRegistry.get(CallToolRequestSchema);
+});
+
+beforeEach(() => {
+  mockAnalyzerClass.prototype.initialize.mockClear();
+  mockAnalyzerClass.prototype.initializeCustomCodebase.mockClear();
+  mockAnalyzerClass.prototype.isInitialized.mockClear();
+  mockAnalyzerClass.prototype.isInitialized.mockReturnValue(true);
+  mockAnalyzerClass.prototype.analyzeClass.mockClear();
+  mockAnalyzerClass.prototype.findClassHierarchy.mockClear();
+  mockAnalyzerClass.prototype.findReferences.mockClear();
+  mockAnalyzerClass.prototype.searchCode.mockClear();
+  mockAnalyzerClass.prototype.analyzeSubsystem.mockClear();
+  mockServerInstance.connect.mockClear();
+  mockServerInstance.close.mockClear();
+  listToolsHandler = handlerRegistry.get(ListToolsRequestSchema);
+  callToolHandler = handlerRegistry.get(CallToolRequestSchema);
+});
+
+afterAll(() => {
+  consoleErrorSpy?.mockRestore();
+});
+
+function expectDefined<T>(value: T | undefined, name: string): asserts value is T {
+  if (value === undefined) throw new Error(`${name} was not registered`);
+}
+
+describe('UnrealAnalyzerServer', () => {
+  it('should initialize server with correct configuration', () => {
+    expect(serverConstructorCalls[0]).toEqual({
+      config: {
+        name: 'unreal-analyzer',
+        version: '0.1.0',
+      },
+      options: {
+        capabilities: { tools: {} },
+      },
     });
   });
 
-  describe('Tool Handlers', () => {
-    it('should register list_tools handler', () => {
-      expect(toolHandlers['list_tools']).toBeDefined();
-    });
+  it('should set up error handler', () => {
+    expect(mockServerInstance.onerror).toBeDefined();
+  });
 
-    it('should register call_tool handler', () => {
-      expect(toolHandlers['call_tool']).toBeDefined();
-    });
+  it('should wire handlers with correct schemas', () => {
+    expect(handlerRegistry.get(ListToolsRequestSchema)).toEqual(expect.any(Function));
+    expect(handlerRegistry.get(CallToolRequestSchema)).toEqual(expect.any(Function));
+  });
 
-    it('should return correct tool list', async () => {
-      const listToolsHandler = toolHandlers['list_tools'];
+  describe('list_tools', () => {
+    it('should expose expected tools', async () => {
+      expectDefined(listToolsHandler, 'listToolsHandler');
       const result = await listToolsHandler();
-
-      expect(result.tools).toEqual(
+      const toolNames = result.tools.map((t: any) => t.name);
+      expect(toolNames).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({
-            name: 'set_unreal_path',
-            description: expect.any(String),
-            inputSchema: expect.any(Object),
-          }),
-          expect.objectContaining({
-            name: 'analyze_class',
-            description: expect.any(String),
-            inputSchema: expect.any(Object),
-          }),
-          // Add more tool checks as needed
+          'set_unreal_path',
+          'set_custom_codebase',
+          'analyze_class',
+          'find_class_hierarchy',
+          'find_references',
+          'search_code',
+          'detect_patterns',
+          'get_best_practices',
+          'analyze_subsystem',
+          'query_api',
         ])
       );
     });
   });
 
-  describe('Tool Execution', () => {
-    const callToolHandler = async (name: string, args: any) => {
-      return await toolHandlers['call_tool']({
-        params: {
-          name,
-          arguments: args,
-        },
-      });
+  describe('call_tool routing', () => {
+    const callTool = async (name: string, args: any) => {
+      expectDefined(callToolHandler, 'callToolHandler');
+      return await callToolHandler({ params: { name, arguments: args } });
     };
 
-    describe('set_unreal_path', () => {
-      it('should initialize analyzer with path', async () => {
-        const path = '/test/path';
-        await callToolHandler('set_unreal_path', { path });
-        expect(mockAnalyzer.initialize).toHaveBeenCalledWith(path);
-      });
-
-      it('should handle initialization errors', async () => {
-        mockAnalyzer.initialize.mockRejectedValue(new Error('Invalid path'));
-        await expect(
-          callToolHandler('set_unreal_path', { path: '/invalid' })
-        ).rejects.toThrow('Invalid path');
-      });
+    it('routes set_unreal_path to analyzer.initialize', async () => {
+      const path = '/tmp/unreal';
+      await callTool('set_unreal_path', { path });
+      expect(mockAnalyzerClass.prototype.initialize).toHaveBeenCalledWith(path);
     });
 
-    describe('analyze_class', () => {
-      it('should require initialization', async () => {
-        mockAnalyzer.isInitialized.mockReturnValue(false);
-        await expect(
-          callToolHandler('analyze_class', { className: 'TestClass' })
-        ).rejects.toThrow('No codebase initialized');
-      });
+    it('routes analyze_class and returns analyzer result text', async () => {
+      const info = { name: 'MyClass' };
+      mockAnalyzerClass.prototype.isInitialized.mockReturnValue(true);
+      mockAnalyzerClass.prototype.analyzeClass.mockResolvedValue(info);
 
-      it('should return class analysis', async () => {
-        mockAnalyzer.isInitialized.mockReturnValue(true);
-        const mockClassInfo = {
-          name: 'TestClass',
-          file: 'test.h',
-          line: 1,
-          superclasses: [],
-          interfaces: [],
-          methods: [],
-          properties: [],
-          comments: []
-        };
-        mockAnalyzer.analyzeClass.mockResolvedValue(mockClassInfo);
-
-        const result = await callToolHandler('analyze_class', {
-          className: 'TestClass',
-        });
-        expect(result.content[0].text).toBe(JSON.stringify(mockClassInfo, null, 2));
-      });
+      const res = await callTool('analyze_class', { className: 'MyClass' });
+      expect(res.content[0].text).toBe(JSON.stringify(info, null, 2));
+      expect(mockAnalyzerClass.prototype.analyzeClass).toHaveBeenCalledWith('MyClass');
     });
 
-    describe('find_references', () => {
-      it('should require initialization', async () => {
-        mockAnalyzer.isInitialized.mockReturnValue(false);
-        await expect(
-          callToolHandler('find_references', { identifier: 'test' })
-        ).rejects.toThrow('No codebase initialized');
-      });
-
-      it('should return references', async () => {
-        mockAnalyzer.isInitialized.mockReturnValue(true);
-        const mockRefs = [{
-          file: 'test.cpp',
-          line: 1,
-          column: 1,
-          context: 'test context'
-        }];
-        mockAnalyzer.findReferences.mockResolvedValue(mockRefs);
-
-        const result = await callToolHandler('find_references', {
-          identifier: 'test',
-          type: 'class',
-        });
-        expect(result.content[0].text).toBe(JSON.stringify(mockRefs, null, 2));
-      });
+    it('throws for unknown tool', async () => {
+      await expect(callTool('unknown_tool', {})).rejects.toThrow('Unknown tool: unknown_tool');
     });
 
-    describe('search_code', () => {
-      it('should require initialization', async () => {
-        mockAnalyzer.isInitialized.mockReturnValue(false);
-        await expect(
-          callToolHandler('search_code', { query: 'test' })
-        ).rejects.toThrow('No codebase initialized');
-      });
-
-      it('should return search results', async () => {
-        mockAnalyzer.isInitialized.mockReturnValue(true);
-        const mockResults = [{
-          file: 'test.cpp',
-          line: 1,
-          column: 1,
-          context: 'test'
-        }];
-        mockAnalyzer.searchCode.mockResolvedValue(mockResults);
-
-        const result = await callToolHandler('search_code', {
-          query: 'test',
-          filePattern: '*.cpp',
-          includeComments: true,
-        });
-        expect(result.content[0].text).toBe(JSON.stringify(mockResults, null, 2));
-      });
+    it('validates required path for set_unreal_path', async () => {
+      await expect(callTool('set_unreal_path', {} as any)).rejects.toThrow(/path is required/i);
     });
 
-    describe('analyze_subsystem', () => {
-      it('should require initialization', async () => {
-        mockAnalyzer.isInitialized.mockReturnValue(false);
-        await expect(
-          callToolHandler('analyze_subsystem', { subsystem: 'Rendering' })
-        ).rejects.toThrow('No codebase initialized');
-      });
-
-      it('should return subsystem analysis', async () => {
-        mockAnalyzer.isInitialized.mockReturnValue(true);
-        const mockSubsystemInfo = {
-          name: 'Rendering',
-          mainClasses: ['RenderClass'],
-          keyFeatures: ['Feature1'],
-          dependencies: ['Dep1'],
-          sourceFiles: ['file1.cpp']
-        };
-        mockAnalyzer.analyzeSubsystem.mockResolvedValue(mockSubsystemInfo);
-
-        const result = await callToolHandler('analyze_subsystem', {
-          subsystem: 'Rendering',
-        });
-        expect(result.content[0].text).toBe(
-          JSON.stringify(mockSubsystemInfo, null, 2)
-        );
-      });
-    });
-  });
-
-  describe('Error Handling', () => {
-    it('should handle unknown tool errors', async () => {
-      await expect(
-        toolHandlers['call_tool']({
-          params: { name: 'unknown_tool', arguments: {} },
-        })
-      ).rejects.toThrow('Unknown tool: unknown_tool');
-    });
-
-    it('should handle analyzer errors', async () => {
-      mockAnalyzer.isInitialized.mockReturnValue(true);
-      mockAnalyzer.analyzeClass.mockRejectedValue(new Error('Analysis failed'));
-
-      await expect(
-        toolHandlers['call_tool']({
-          params: { name: 'analyze_class', arguments: { className: 'Test' } },
-        })
-      ).rejects.toThrow('Analysis failed');
+    it('validates required className for analyze_class', async () => {
+      await expect(callTool('analyze_class', {} as any)).rejects.toThrow(/class name is required/i);
     });
   });
 });

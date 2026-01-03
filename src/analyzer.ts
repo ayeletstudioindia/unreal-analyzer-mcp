@@ -2,11 +2,17 @@
  * Created by Ayelet Technology Private Limited
  */
 
-import Parser, { Query, QueryCapture, SyntaxNode } from 'tree-sitter';
-import * as CPP from 'tree-sitter-cpp';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as glob from 'glob';
+import type { Tree, SyntaxNode, Query, QueryCapture } from "./tree-sitter-compat.js";
+import { ParserCJS, CPPLanguage, QueryCtor } from "./tree-sitter-compat.js";
+
+import * as fs from "fs";
+import * as path from "path";
+import * as glob from "glob";
+
+// Infer Language type from parser.setLanguage() without referencing Parser type names directly
+type Language = Parameters<InstanceType<typeof ParserCJS>["setLanguage"]>[0];
+
+
 
 interface ClassInfo {
   name: string;
@@ -118,16 +124,13 @@ interface CodePatternMatch {
   learningResources: LearningResource[];
 }
 
-type ExtendedParser = Parser & {
-  createQuery(pattern: string): Query;
-};
-
 export class UnrealCodeAnalyzer {
-  private parser: ExtendedParser;
+  private parser: InstanceType<typeof ParserCJS>;
+  private cppLang: Language;
   private unrealPath: string | null = null;
   private customPath: string | null = null;
   private classCache: Map<string, ClassInfo> = new Map();
-  private astCache: Map<string, Parser.Tree> = new Map();
+  private astCache: Map<string, Tree> = new Map();
   private queryCache: Map<string, Query> = new Map();
   private initialized: boolean = false;
   private readonly MAX_CACHE_SIZE = 1000;
@@ -142,18 +145,16 @@ export class UnrealCodeAnalyzer {
   };
 
   constructor() {
-    this.parser = new Parser() as ExtendedParser;
-    this.parser.setLanguage(CPP);
-    
-    // Pre-cache common queries
-    Object.entries(this.QUERY_PATTERNS).forEach(([key, pattern]) => {
-      const query = this.parser.createQuery(pattern);
-      if (query) {
-        this.queryCache.set(key, query);
-      }
-    });
-  }
+    this.parser = new ParserCJS();
+    this.cppLang = CPPLanguage as unknown as Language;
+    this.parser.setLanguage(this.cppLang);
 
+    // Pre-cache common queries
+    for (const [key, pattern] of Object.entries(this.QUERY_PATTERNS)) {
+      const query = new QueryCtor(this.cppLang, pattern) as Query;
+      this.queryCache.set(key, query);
+    }
+  }
   private manageCache<T extends object>(cache: Map<string, T>, key: string, value: T): void {
     if (cache.size >= this.MAX_CACHE_SIZE) {
       // Remove oldest entry using FIFO
@@ -162,7 +163,7 @@ export class UnrealCodeAnalyzer {
         cache.delete(oldestKey);
       }
     }
-    
+
     cache.set(key, value);
     this.cacheQueue.push(key);
   }
@@ -201,11 +202,11 @@ export class UnrealCodeAnalyzer {
       throw new Error('No valid path configured');
     }
 
-    const paths = this.unrealPath 
+    const paths = this.unrealPath
       ? [
-          path.join(this.unrealPath, 'Engine/Source/Runtime/Core'),
-          path.join(this.unrealPath, 'Engine/Source/Runtime/CoreUObject'),
-        ]
+        path.join(this.unrealPath, 'Engine/Source/Runtime/Core'),
+        path.join(this.unrealPath, 'Engine/Source/Runtime/CoreUObject'),
+      ]
       : [this.customPath!];
 
     // Process files in parallel batches
@@ -220,31 +221,38 @@ export class UnrealCodeAnalyzer {
   }
 
   private async parseFile(filePath: string): Promise<void> {
-    const content = fs.readFileSync(filePath, 'utf8');
+    const content = fs.readFileSync(filePath, "utf8");
     let tree = this.astCache.get(filePath);
-    
-    if (!tree || tree.rootNode.hasError()) {
-      tree = this.parser.parse(content);
+
+    if (!tree || (tree as any).hasError?.()) {
+      const parsed = this.parser.parse(content) as Tree | undefined;
+      if (!parsed) return; // or throw new Error(...)
+      tree = parsed;
       this.manageCache(this.astCache, filePath, tree);
     }
 
-    let classQuery = this.queryCache.get('CLASS');
+    // Tree is guaranteed here
+    const treeNonNull = tree as Tree;
+
+    let classQuery = this.queryCache.get("CLASS");
     if (!classQuery) {
-      classQuery = this.parser.createQuery(this.QUERY_PATTERNS.CLASS);
-      this.queryCache.set('CLASS', classQuery);
+      classQuery = new QueryCtor(this.cppLang, this.QUERY_PATTERNS.CLASS) as Query;
+      this.queryCache.set("CLASS", classQuery);
     }
 
-    const matches = classQuery.matches(tree.rootNode);
+    const matches = classQuery.matches(treeNonNull.rootNode);
+
     for (const match of matches) {
-      const classNode = match.captures.find((c: QueryCapture) => c.name === 'class')?.node;
-      const className = match.captures.find((c: QueryCapture) => c.name === 'class_name')?.node.text;
-      
+      const classNode = match.captures.find((c: QueryCapture) => c.name === "class")?.node;
+      const className = match.captures.find((c: QueryCapture) => c.name === "class_name")?.node.text;
+
       if (classNode && className) {
         const classInfo = await this.extractClassInfo(classNode, filePath);
         this.classCache.set(className, classInfo);
       }
     }
   }
+
 
   private async extractClassInfo(node: SyntaxNode, filePath: string): Promise<ClassInfo> {
     const classInfo: ClassInfo = {
@@ -336,7 +344,7 @@ export class UnrealCodeAnalyzer {
   private extractParameterInfo(node: SyntaxNode): ParameterInfo | null {
     const typeNode = node.descendantsOfType('type_identifier')[0];
     const nameNode = node.descendantsOfType('identifier')[0];
-    
+
     if (!typeNode || !nameNode) return null;
 
     return {
@@ -348,7 +356,7 @@ export class UnrealCodeAnalyzer {
   private extractPropertyInfo(node: SyntaxNode): PropertyInfo | null {
     const typeNode = node.descendantsOfType('type_identifier')[0];
     const nameNode = node.descendantsOfType('identifier')[0];
-    
+
     if (!typeNode || !nameNode) return null;
 
     return {
@@ -398,7 +406,7 @@ export class UnrealCodeAnalyzer {
     includeInterfaces: boolean = true
   ): Promise<ClassHierarchy> {
     const classInfo = await this.analyzeClass(className);
-    
+
     const hierarchy: ClassHierarchy = {
       className: classInfo.name,
       superclasses: [],
@@ -452,27 +460,27 @@ export class UnrealCodeAnalyzer {
         batch.map(async (file) => {
           const content = fs.readFileSync(file, 'utf8');
           let tree = this.astCache.get(file);
-          
+
           if (!tree) {
-            tree = this.parser.parse(content);
+            const parsed = this.parser.parse(content) as Tree | undefined;
+            if (!parsed) return [];
+            tree = parsed;
             this.manageCache(this.astCache, file, tree);
           }
 
+          const treeNonNull = tree as Tree;
+
           // Use cached query if available
-          const queryString = type === 'class' 
+          const queryString = type === 'class'
             ? `(type_identifier) @id (#eq? @id "${identifier}")`
             : `(identifier) @id (#eq? @id "${identifier}")`;
-          
+
           const cacheKey = `${type}-${identifier}`;
           let query = this.queryCache.get(cacheKey);
-          
-          if (!query) {
-            query = this.parser.createQuery(queryString);
-            this.queryCache.set(cacheKey, query);
-          }
 
-          if (!query || !tree) {
-            return [];
+          if (!query) {
+            query = new QueryCtor(this.cppLang, queryString) as Query;
+            this.queryCache.set(cacheKey, query);
           }
 
           const matches = query.matches(tree.rootNode);
@@ -534,7 +542,7 @@ export class UnrealCodeAnalyzer {
           // Use a single regex test per line for better performance
           for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
-            
+
             // Skip comment lines if not including comments
             if (!includeComments && (line.trim().startsWith('//') || line.trim().startsWith('/*'))) {
               continue;
@@ -543,7 +551,7 @@ export class UnrealCodeAnalyzer {
             if (regex.test(line)) {
               // Reset regex lastIndex after test
               regex.lastIndex = 0;
-              
+
               const context = lines
                 .slice(Math.max(0, i - 2), i + 3)
                 .join('\n');
@@ -567,7 +575,7 @@ export class UnrealCodeAnalyzer {
   }
 
   private apiCache: Map<string, ApiReference> = new Map();
-  
+
   private readonly UNREAL_PATTERNS: PatternInfo[] = [
     {
       name: 'UPROPERTY Macro',
@@ -633,10 +641,10 @@ export class UnrealCodeAnalyzer {
           .join('\n');
 
         // Check for pattern examples
-        if (pattern.examples.some(example => 
-          line.includes(example.split('\n')[0]) || 
+        if (pattern.examples.some(example =>
+          line.includes(example.split('\n')[0]) ||
           this.isPatternMatch(line, pattern.name))) {
-          
+
           const suggestedImprovements = this.analyzePotentialImprovements(
             context,
             pattern
@@ -819,7 +827,7 @@ export class UnrealCodeAnalyzer {
     context += `Module: ${apiRef.module}\n`;
     context += `Category: ${apiRef.category}\n\n`;
     context += `Syntax:\n${apiRef.syntax}\n`;
-    
+
     if (includeExamples && apiRef.examples.length > 0) {
       context += '\nExamples:\n';
       context += apiRef.examples.map(ex => `${ex}\n`).join('\n');
@@ -830,8 +838,8 @@ export class UnrealCodeAnalyzer {
 
   private extractDescription(comments: string[]): string {
     // Extract the main description from comments
-    const descLines = comments.filter(c => 
-      !c.includes('@example') && 
+    const descLines = comments.filter(c =>
+      !c.includes('@example') &&
       !c.includes('@remarks') &&
       !c.includes('@see')
     );
@@ -925,7 +933,7 @@ export class UnrealCodeAnalyzer {
     // Process files in parallel batches
     const BATCH_SIZE = 10;
     const headerFiles = subsystemInfo.sourceFiles.filter(f => f.endsWith('.h'));
-    
+
     for (let i = 0; i < headerFiles.length; i += BATCH_SIZE) {
       const batch = headerFiles.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (file) => {

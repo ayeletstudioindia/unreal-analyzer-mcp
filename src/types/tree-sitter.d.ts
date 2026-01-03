@@ -17,6 +17,7 @@ declare module 'tree-sitter' {
     children: SyntaxNode[];
     parent: SyntaxNode | null;
     descendantsOfType(type: string): SyntaxNode[];
+    hasError(): boolean;
   }
 
   export interface Position {

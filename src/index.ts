@@ -3,14 +3,69 @@
  * Created by Ayelet Technology Private Limited
  */
 
-import { Server, StdioServerTransport } from '@modelcontextprotocol/create-server';
-import type { CallToolRequest, ListToolsRequest } from '@modelcontextprotocol/create-server';
+import path from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { z } from 'zod';
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { UnrealCodeAnalyzer } from './analyzer.js';
 import { GAME_GENRES, GameGenre, GenreFlag } from './types/game-genres.js';
+
+const toolSchemas = {
+  set_unreal_path: z.object({
+    path: z.preprocess((val) => val ?? '', z.string().min(1, 'Path is required')),
+  }),
+  set_custom_codebase: z.object({
+    path: z.preprocess((val) => val ?? '', z.string().min(1, 'Path is required')),
+  }),
+  analyze_class: z.object({
+    className: z.preprocess((val) => val ?? '', z.string().min(1, 'Class name is required')),
+  }),
+  find_class_hierarchy: z.object({
+    className: z.preprocess((val) => val ?? '', z.string().min(1, 'Class name is required')),
+    includeImplementedInterfaces: z.boolean().optional().default(true),
+  }),
+  find_references: z.object({
+    identifier: z.preprocess((val) => val ?? '', z.string().min(1, 'Identifier is required')),
+    type: z.enum(['class', 'function', 'variable']),
+  }),
+  search_code: z.object({
+    query: z.preprocess((val) => val ?? '', z.string().min(1, 'Query is required')),
+    filePattern: z.string().optional().default('*.{h,cpp}'),
+    includeComments: z.boolean().optional().default(true),
+  }),
+  analyze_subsystem: z.object({
+    subsystem: z.enum([
+      'Rendering',
+      'Physics',
+      'Audio',
+      'Networking',
+      'Input',
+      'AI',
+      'Animation',
+      'UI',
+    ]),
+  }),
+  query_api: z.object({
+    query: z.preprocess((val) => val ?? '', z.string().min(1, 'Query is required')),
+    category: z.enum(['Object', 'Actor', 'Structure', 'Component', 'Miscellaneous']).optional(),
+    module: z.string().optional(),
+    includeExamples: z.boolean().optional().default(true),
+    maxResults: z.number().int().positive().optional().default(10),
+  }),
+  detect_patterns: z.object({
+    filePath: z.preprocess((val) => val ?? '', z.string().min(1, 'File path is required')),
+  }),
+  get_best_practices: z.object({
+    concept: z.enum(['UPROPERTY', 'UFUNCTION', 'Components', 'Events', 'Replication', 'Blueprints']),
+  }),
+} satisfies Record<string, z.ZodTypeAny>;
 
 class UnrealAnalyzerServer {
   private server: Server;
   private analyzer: UnrealCodeAnalyzer;
+  private autoInitPromise: Promise<void>;
 
   constructor() {
     this.server = new Server(
@@ -26,6 +81,7 @@ class UnrealAnalyzerServer {
     );
 
     this.analyzer = new UnrealCodeAnalyzer();
+    this.autoInitPromise = this.initializeFromSettings();
     this.setupToolHandlers();
     
     this.server.onerror = (error: Error) => console.error('[MCP Error]', error);
@@ -35,8 +91,48 @@ class UnrealAnalyzerServer {
     });
   }
 
+  private async initializeFromSettings() {
+    const unrealPath = process.env.UNREAL_ENGINE_PATH;
+    const customCodebasePath = process.env.CUSTOM_CODEBASE_PATH;
+
+    if (unrealPath) {
+      try {
+        await this.analyzer.initialize(unrealPath);
+        return;
+      } catch (error) {
+        console.error('[MCP Config] Failed to initialize from UNREAL_ENGINE_PATH', error);
+      }
+    }
+
+    if (customCodebasePath) {
+      try {
+        await this.analyzer.initializeCustomCodebase(customCodebasePath);
+        return;
+      } catch (error) {
+        console.error('[MCP Config] Failed to initialize from CUSTOM_CODEBASE_PATH', error);
+      }
+    }
+
+    const configPath = process.env.UNREAL_ANALYZER_CONFIG ?? path.join(process.cwd(), 'unreal-analyzer.config.json');
+    try {
+      const raw = await readFile(configPath, 'utf8');
+      const config = JSON.parse(raw);
+      if (config?.unrealPath) {
+        await this.analyzer.initialize(config.unrealPath);
+        return;
+      }
+      if (config?.customCodebasePath) {
+        await this.analyzer.initializeCustomCodebase(config.customCodebasePath);
+      }
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') {
+        console.error('[MCP Config] Failed to load config file', error);
+      }
+    }
+  }
+
   private setupToolHandlers() {
-    this.server.setRequestHandler<ListToolsRequest>('list_tools', async () => ({
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: [
         {
           name: 'set_unreal_path',
@@ -231,37 +327,42 @@ class UnrealAnalyzerServer {
       ],
     }));
 
-    this.server.setRequestHandler<CallToolRequest>('call_tool', async (request: CallToolRequest) => {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const toolName = request.params.name;
+      const rawArgs = request.params.arguments ?? {};
+      const validator = toolSchemas[toolName as keyof typeof toolSchemas];
+      const args = validator ? validator.parse(rawArgs) : rawArgs;
+
       // Only check for initialization for analysis tools
       const analysisTools = ['analyze_class', 'find_class_hierarchy', 'find_references', 'search_code', 'analyze_subsystem', 'query_api'];
-      if (analysisTools.includes(request.params.name) && !this.analyzer.isInitialized() && 
-          request.params.name !== 'set_unreal_path' && request.params.name !== 'set_custom_codebase') {
+      if (analysisTools.includes(toolName) && !this.analyzer.isInitialized() && 
+          toolName !== 'set_unreal_path' && toolName !== 'set_custom_codebase') {
         throw new Error('No codebase initialized. Use set_unreal_path or set_custom_codebase first.');
       }
 
-      switch (request.params.name) {
+      switch (toolName) {
         case 'detect_patterns':
-          return this.handleDetectPatterns(request.params.arguments);
+          return this.handleDetectPatterns(args);
         case 'get_best_practices':
-          return this.handleGetBestPractices(request.params.arguments);
+          return this.handleGetBestPractices(args);
         case 'set_unreal_path':
-          return this.handleSetUnrealPath(request.params.arguments);
+          return this.handleSetUnrealPath(args);
         case 'set_custom_codebase':
-          return this.handleSetCustomCodebase(request.params.arguments);
+          return this.handleSetCustomCodebase(args);
         case 'analyze_class':
-          return this.handleAnalyzeClass(request.params.arguments);
+          return this.handleAnalyzeClass(args);
         case 'find_class_hierarchy':
-          return this.handleFindClassHierarchy(request.params.arguments);
+          return this.handleFindClassHierarchy(args);
         case 'find_references':
-          return this.handleFindReferences(request.params.arguments);
+          return this.handleFindReferences(args);
         case 'search_code':
-          return this.handleSearchCode(request.params.arguments);
+          return this.handleSearchCode(args);
         case 'analyze_subsystem':
-          return this.handleAnalyzeSubsystem(request.params.arguments);
+          return this.handleAnalyzeSubsystem(args);
         case 'query_api':
-          return this.handleQueryApi(request.params.arguments);
+          return this.handleQueryApi(args);
         default:
-          throw new Error(`Unknown tool: ${request.params.name}`);
+          throw new Error(`Unknown tool: ${toolName}`);
       }
     });
   }
@@ -374,7 +475,7 @@ class UnrealAnalyzerServer {
 
   private async handleDetectPatterns(args: any) {
     try {
-      const fileContent = await require('fs').promises.readFile(args.filePath, 'utf8');
+      const fileContent = await readFile(args.filePath, 'utf8');
       const patterns = await this.analyzer.detectPatterns(fileContent, args.filePath);
       
       // Format the output to be more readable in Cline
@@ -559,6 +660,7 @@ class UnrealAnalyzerServer {
   }
 
   async run() {
+    await this.autoInitPromise;
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     console.error('Unreal Engine Analyzer MCP server running on stdio');
@@ -566,4 +668,6 @@ class UnrealAnalyzerServer {
 }
 
 const server = new UnrealAnalyzerServer();
-server.run().catch(console.error);
+if (process.env.NODE_ENV !== 'test') {
+  server.run().catch(console.error);
+}
