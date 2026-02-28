@@ -3,10 +3,10 @@
  */
 
 import Parser, { Query, QueryCapture, SyntaxNode } from 'tree-sitter';
-import * as CPP from 'tree-sitter-cpp';
+import CPP from 'tree-sitter-cpp';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as glob from 'glob';
+import glob from 'glob';
 
 interface ClassInfo {
   name: string;
@@ -118,12 +118,8 @@ interface CodePatternMatch {
   learningResources: LearningResource[];
 }
 
-type ExtendedParser = Parser & {
-  createQuery(pattern: string): Query;
-};
-
 export class UnrealCodeAnalyzer {
-  private parser: ExtendedParser;
+  private parser: Parser;
   private unrealPath: string | null = null;
   private customPath: string | null = null;
   private classCache: Map<string, ClassInfo> = new Map();
@@ -141,15 +137,22 @@ export class UnrealCodeAnalyzer {
     IDENTIFIER: `(identifier) @id`
   };
 
+  private language: any;
+
   constructor() {
-    this.parser = new Parser() as ExtendedParser;
-    this.parser.setLanguage(CPP);
-    
+    this.parser = new Parser();
+    this.language = CPP;
+    this.parser.setLanguage(this.language);
+
     // Pre-cache common queries
     Object.entries(this.QUERY_PATTERNS).forEach(([key, pattern]) => {
-      const query = this.parser.createQuery(pattern);
-      if (query) {
-        this.queryCache.set(key, query);
+      try {
+        const query = new (Parser as any).Query(this.language, pattern);
+        if (query) {
+          this.queryCache.set(key, query);
+        }
+      } catch (e) {
+        // Query pattern may not be supported
       }
     });
   }
@@ -230,11 +233,11 @@ export class UnrealCodeAnalyzer {
 
     let classQuery = this.queryCache.get('CLASS');
     if (!classQuery) {
-      classQuery = this.parser.createQuery(this.QUERY_PATTERNS.CLASS);
-      this.queryCache.set('CLASS', classQuery);
+      classQuery = new (Parser as any).Query(this.language, this.QUERY_PATTERNS.CLASS);
+      this.queryCache.set('CLASS', classQuery!);
     }
 
-    const matches = classQuery.matches(tree.rootNode);
+    const matches = classQuery!.matches(tree.rootNode);
     for (const match of matches) {
       const classNode = match.captures.find((c: QueryCapture) => c.name === 'class')?.node;
       const className = match.captures.find((c: QueryCapture) => c.name === 'class_name')?.node.text;
@@ -467,8 +470,8 @@ export class UnrealCodeAnalyzer {
           let query = this.queryCache.get(cacheKey);
           
           if (!query) {
-            query = this.parser.createQuery(queryString);
-            this.queryCache.set(cacheKey, query);
+            query = new (Parser as any).Query(this.language, queryString);
+            this.queryCache.set(cacheKey, query!);
           }
 
           if (!query || !tree) {
@@ -509,13 +512,14 @@ export class UnrealCodeAnalyzer {
       throw new Error('Analyzer not initialized');
     }
 
-    if (!this.unrealPath) {
+    const searchPath = this.customPath || this.unrealPath;
+    if (!searchPath) {
       throw new Error('No valid search path configured');
     }
 
     const results: CodeReference[] = [];
     const files = glob.sync(`**/${filePattern}`, {
-      cwd: this.unrealPath,
+      cwd: searchPath,
       absolute: true,
     });
 

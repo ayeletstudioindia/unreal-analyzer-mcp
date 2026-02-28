@@ -14,10 +14,10 @@
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch"
   },
   "dependencies": {
-    "@modelcontextprotocol/create-server": "^0.1.0",
+    "@modelcontextprotocol/sdk": "0.6.0",
     "glob": "^8.1.0",
-    "tree-sitter": "^0.20.1",
-    "tree-sitter-cpp": "^0.20.0"
+    "tree-sitter": "0.20.6",
+    "tree-sitter-cpp": "0.20.5"
   },
   "devDependencies": {
     "@types/glob": "^8.1.0",
