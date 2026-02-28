@@ -3,8 +3,9 @@
  * Created by Ayelet Technology Private Limited
  */
 
-import { Server, StdioServerTransport } from '@modelcontextprotocol/create-server';
-import type { CallToolRequest, ListToolsRequest } from '@modelcontextprotocol/create-server';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { UnrealCodeAnalyzer } from './analyzer.js';
 import { GAME_GENRES, GameGenre, GenreFlag } from './types/game-genres.js';
 
@@ -36,7 +37,7 @@ class UnrealAnalyzerServer {
   }
 
   private setupToolHandlers() {
-    this.server.setRequestHandler<ListToolsRequest>('list_tools', async () => ({
+    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: [
         {
           name: 'set_unreal_path',
@@ -231,7 +232,7 @@ class UnrealAnalyzerServer {
       ],
     }));
 
-    this.server.setRequestHandler<CallToolRequest>('call_tool', async (request: CallToolRequest) => {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
       // Only check for initialization for analysis tools
       const analysisTools = ['analyze_class', 'find_class_hierarchy', 'find_references', 'search_code', 'analyze_subsystem', 'query_api'];
       if (analysisTools.includes(request.params.name) && !this.analyzer.isInitialized() && 
@@ -374,7 +375,8 @@ class UnrealAnalyzerServer {
 
   private async handleDetectPatterns(args: any) {
     try {
-      const fileContent = await require('fs').promises.readFile(args.filePath, 'utf8');
+      const { readFile } = await import('fs/promises');
+      const fileContent = await readFile(args.filePath, 'utf8');
       const patterns = await this.analyzer.detectPatterns(fileContent, args.filePath);
       
       // Format the output to be more readable in Cline
